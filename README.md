@@ -1,16 +1,16 @@
 # five-nine
 
-A terminal UI for monitoring Claude, OpenAI, and Apple Developer service status in real time.
+A terminal UI for monitoring any service that uses Atlassian Statuspage.
 
 ![Rust](https://img.shields.io/badge/rust-2024-orange)
-![Version](https://img.shields.io/badge/version-0.2.3-blue)
+![Version](https://img.shields.io/badge/version-0.2.4-blue)
 
 ## Features
 
-- Live status for Claude, OpenAI, and Apple Developer service components
-- Add any service that uses Atlassian Statuspage with `five-nine add <name>`
+- Monitor any Atlassian Statuspage service — Claude, OpenAI, GitHub, Vercel, Stripe, and more
+- Auto-discovers status APIs by name; explicit URL override available
 - 90-day uptime percentage per service
-- Airport-style animation (departing planes + ATC tower) colored by Claude Code's current status
+- Airport-style animation colored by the worst current status across all providers
 - Scrollable service board
 - Auto-refreshes every 30 seconds
 - One-shot `status` command for scripting and shell pipelines
@@ -47,15 +47,15 @@ five-nine status          # colored table to stdout
 five-nine status --json   # machine-readable JSON
 ```
 
-### Custom providers
+### Manage providers
 
-Add any service that uses Atlassian Statuspage — five-nine auto-discovers the API:
+All providers are user-configured. Claude and OpenAI are seeded on first run.
 
 ```bash
-five-nine add github          # auto-discover
+five-nine add github          # auto-discover status page
 five-nine add stripe --url https://www.stripestatus.com   # explicit URL
 five-nine list                # show all providers
-five-nine remove github       # remove a custom provider
+five-nine remove github       # remove a provider
 ```
 
 Config is saved to `~/.config/five-nine/providers.json`.

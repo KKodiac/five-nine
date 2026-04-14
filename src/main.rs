@@ -22,27 +22,8 @@ use serde::{Deserialize, Serialize};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const CLAUDE_SUMMARY_URL: &str = "https://status.claude.com/api/v2/summary.json";
-const CLAUDE_INCIDENTS_URL: &str = "https://status.claude.com/api/v2/incidents.json";
-const OPENAI_SUMMARY_URL: &str = "https://status.openai.com/api/v2/summary.json";
-const OPENAI_INCIDENTS_URL: &str = "https://status.openai.com/api/v2/incidents.json";
-const APPLE_STATUS_URL: &str =
-    "https://www.apple.com/support/systemstatus/data/developer/system_status_en_US.js";
-
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const UPTIME_WINDOW_DAYS: f64 = 90.0;
-
-// Apple developer services to always show (others shown only if degraded)
-const APPLE_PINNED: &[&str] = &[
-    "App Store Connect",
-    "App Store Connect - TestFlight",
-    "APNS",
-    "CloudKit Database",
-    "Certificates, Identifiers & Profiles",
-    "Xcode Cloud",
-    "Xcode Automatic Configuration",
-    "Developer ID Notary Service",
-];
 
 // ── Statuspage API types ──────────────────────────────────────────────────────
 
@@ -85,32 +66,6 @@ struct IncidentsResponse {
     incidents: Vec<Incident>,
 }
 
-// ── Apple API types ───────────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct AppleResponse {
-    services: Vec<AppleService>,
-}
-
-#[derive(Deserialize, Clone)]
-struct AppleService {
-    #[serde(rename = "serviceName")]
-    service_name: String,
-    events: Vec<AppleEvent>,
-}
-
-#[derive(Deserialize, Clone)]
-struct AppleEvent {
-    #[serde(rename = "eventStatus")]
-    event_status: String,
-    #[serde(rename = "statusType")]
-    status_type: String,
-    #[serde(rename = "epochStartDate")]
-    epoch_start_ms: i64,
-    #[serde(rename = "epochEndDate")]
-    epoch_end_ms: Option<i64>,
-}
-
 // ── Normalized types ──────────────────────────────────────────────────────────
 
 struct ServiceRow {
@@ -126,10 +81,7 @@ struct ProviderContent {
 }
 
 struct AllProviders {
-    claude: Result<ProviderContent, String>,
-    openai: Result<ProviderContent, String>,
-    apple: Result<ProviderContent, String>,
-    custom: Vec<(CustomProvider, Result<ProviderContent, String>)>,
+    providers: Vec<(CustomProvider, Result<ProviderContent, String>)>,
 }
 
 // ── Custom provider config ────────────────────────────────────────────────────
@@ -168,8 +120,32 @@ fn save_config_to(config: &Config, path: &PathBuf) -> Result<(), String> {
     std::fs::write(path, json).map_err(|e| e.to_string())
 }
 
+fn default_providers() -> Vec<CustomProvider> {
+    vec![
+        CustomProvider {
+            name: "CLAUDE".to_string(),
+            source: "status.claude.com".to_string(),
+            summary_url: "https://status.claude.com/api/v2/summary.json".to_string(),
+            incidents_url: "https://status.claude.com/api/v2/incidents.json".to_string(),
+        },
+        CustomProvider {
+            name: "OPENAI".to_string(),
+            source: "status.openai.com".to_string(),
+            summary_url: "https://status.openai.com/api/v2/summary.json".to_string(),
+            incidents_url: "https://status.openai.com/api/v2/incidents.json".to_string(),
+        },
+    ]
+}
+
 fn load_config() -> Config {
-    load_config_from(&config_path())
+    let path = config_path();
+    if path.exists() {
+        return load_config_from(&path);
+    }
+    // First run: seed defaults and persist so users can edit freely
+    let config = Config { providers: default_providers() };
+    let _ = save_config_to(&config, &path);
+    config
 }
 
 fn save_config(config: &Config) -> Result<(), String> {
@@ -286,70 +262,6 @@ fn normalize_statuspage(summary: SummaryResponse, uptime: HashMap<String, f64>) 
     }
 }
 
-fn apple_service_status(events: &[AppleEvent]) -> &'static str {
-    let now_ms = Utc::now().timestamp_millis();
-    let active = events.iter().any(|e| {
-        e.event_status != "resolved"
-            && e.epoch_start_ms <= now_ms
-            && e.epoch_end_ms.unwrap_or(i64::MAX) >= now_ms
-    });
-    if !active {
-        "operational"
-    } else {
-        let is_outage = events.iter().any(|e| {
-            e.event_status != "resolved" && e.status_type.to_lowercase().contains("outage")
-        });
-        if is_outage { "major_outage" } else { "degraded_performance" }
-    }
-}
-
-fn apple_uptime(events: &[AppleEvent]) -> f64 {
-    let now_ms = Utc::now().timestamp_millis();
-    let window_start_ms = now_ms - (UPTIME_WINDOW_DAYS as i64 * 86_400_000);
-    let window_ms = UPTIME_WINDOW_DAYS * 86_400_000.0;
-    let downtime_ms: i64 = events
-        .iter()
-        .map(|e| {
-            let start = e.epoch_start_ms.max(window_start_ms);
-            let end = e.epoch_end_ms.unwrap_or(now_ms).min(now_ms);
-            (end - start).max(0)
-        })
-        .sum();
-    (1.0 - downtime_ms as f64 / window_ms).clamp(0.0, 1.0) * 100.0
-}
-
-fn normalize_apple(services: Vec<AppleService>) -> ProviderContent {
-    let pinned: std::collections::HashSet<&str> = APPLE_PINNED.iter().copied().collect();
-
-    let visible: Vec<&AppleService> = services
-        .iter()
-        .filter(|s| {
-            pinned.contains(s.service_name.as_str())
-                || !s.events.is_empty()
-        })
-        .collect();
-
-    let any_degraded = visible.iter().any(|s| apple_service_status(&s.events) != "operational");
-    let indicator = if any_degraded { "minor" } else { "none" }.to_string();
-    let description = if any_degraded {
-        "Some Services Experiencing Issues"
-    } else {
-        "All Developer Services Operational"
-    }
-    .to_string();
-
-    let service_rows = visible
-        .iter()
-        .map(|s| ServiceRow {
-            name: s.service_name.clone(),
-            status: apple_service_status(&s.events).to_string(),
-            uptime_pct: apple_uptime(&s.events),
-        })
-        .collect();
-
-    ProviderContent { indicator, description, services: service_rows }
-}
-
 async fn fetch_statuspage(
     summary_url: &str,
     incidents_url: &str,
@@ -376,54 +288,44 @@ async fn fetch_statuspage(
     Ok(normalize_statuspage(summary, uptime))
 }
 
-async fn fetch_apple() -> Result<ProviderContent, String> {
-    let body = reqwest::get(APPLE_STATUS_URL)
-        .await
-        .map_err(|e| format!("Network error: {e}"))?
-        .text()
-        .await
-        .map_err(|e| format!("Read error: {e}"))?;
-
-    // Strip JSONP wrapper: jsonCallback({...});
-    let json = body
-        .trim()
-        .strip_prefix("jsonCallback(")
-        .and_then(|s| s.strip_suffix(");").or_else(|| s.strip_suffix(')')))
-        .unwrap_or(&body);
-
-    let parsed: AppleResponse =
-        serde_json::from_str(json).map_err(|e| format!("Parse error: {e}"))?;
-
-    Ok(normalize_apple(parsed.services))
-}
-
-async fn fetch_all(custom_providers: &[CustomProvider]) -> FetchState {
-    let (claude, openai, apple) = tokio::join!(
-        fetch_statuspage(CLAUDE_SUMMARY_URL, CLAUDE_INCIDENTS_URL),
-        fetch_statuspage(OPENAI_SUMMARY_URL, OPENAI_INCIDENTS_URL),
-        fetch_apple(),
-    );
-
-    // Fetch custom providers concurrently via JoinSet
+async fn fetch_all(providers: &[CustomProvider]) -> FetchState {
     let mut set = tokio::task::JoinSet::new();
-    for (i, p) in custom_providers.iter().cloned().enumerate() {
+    for (i, p) in providers.iter().cloned().enumerate() {
         set.spawn(async move {
             let result = fetch_statuspage(&p.summary_url, &p.incidents_url).await;
             (i, p, result)
         });
     }
-    let mut custom_unsorted: Vec<(usize, CustomProvider, Result<ProviderContent, String>)> =
-        Vec::new();
+    let mut unsorted: Vec<(usize, CustomProvider, Result<ProviderContent, String>)> = Vec::new();
     while let Some(Ok(entry)) = set.join_next().await {
-        custom_unsorted.push(entry);
+        unsorted.push(entry);
     }
-    custom_unsorted.sort_by_key(|(i, _, _)| *i);
-    let custom = custom_unsorted.into_iter().map(|(_, p, r)| (p, r)).collect();
-
-    FetchState::Ok(Arc::new(AllProviders { claude, openai, apple, custom }))
+    unsorted.sort_by_key(|(i, _, _)| *i);
+    let providers = unsorted.into_iter().map(|(_, p, r)| (p, r)).collect();
+    FetchState::Ok(Arc::new(AllProviders { providers }))
 }
 
 // ── Rendering helpers ─────────────────────────────────────────────────────────
+
+fn indicator_rank(s: &str) -> u8 {
+    match s {
+        "critical" | "major_outage"      => 4,
+        "major"    | "partial_outage"    => 3,
+        "minor"    | "degraded_performance" => 2,
+        "under_maintenance"              => 1,
+        _                                => 0,
+    }
+}
+
+/// Returns the (indicator, description) of the worst-off provider.
+fn worst_status(providers: &[(CustomProvider, Result<ProviderContent, String>)]) -> (String, String) {
+    providers
+        .iter()
+        .filter_map(|(_, r)| r.as_ref().ok())
+        .max_by_key(|c| indicator_rank(&c.indicator))
+        .map(|c| (c.indicator.clone(), c.description.clone()))
+        .unwrap_or_else(|| ("none".to_string(), "All Systems Operational".to_string()))
+}
 
 fn indicator_color(indicator: &str) -> Color {
     match indicator {
@@ -576,33 +478,10 @@ fn draw(f: &mut Frame, app: &mut App) {
         ])
         .split(area);
 
-    // ── Determine wave / overall status ───────────────────────────────────────
-    let (wave_indicator, overall_indicator, overall_desc) = match &app.fetch_state {
-        FetchState::Ok(all) => {
-            let claude_code_indicator = all
-                .claude
-                .as_ref()
-                .ok()
-                .and_then(|c| {
-                    c.services
-                        .iter()
-                        .find(|s| s.name.to_lowercase().contains("claude code"))
-                        .map(|s| s.status.clone())
-                })
-                .unwrap_or_else(|| {
-                    all.claude
-                        .as_ref()
-                        .map(|c| c.indicator.clone())
-                        .unwrap_or_else(|_| "critical".into())
-                });
-            let (ind, desc) = all
-                .claude
-                .as_ref()
-                .map(|c| (c.indicator.clone(), c.description.clone()))
-                .unwrap_or_else(|e| ("critical".into(), e.clone()));
-            (claude_code_indicator, ind, desc)
-        }
-        FetchState::Loading => ("none".into(), "none".into(), "Fetching…".into()),
+    // ── Determine overall status (worst across all providers) ─────────────────
+    let (overall_indicator, overall_desc) = match &app.fetch_state {
+        FetchState::Ok(all) => worst_status(&all.providers),
+        FetchState::Loading => ("none".to_string(), "Fetching…".to_string()),
     };
 
     let overall_color = indicator_color(&overall_indicator);
@@ -620,7 +499,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             Style::default().fg(Color::DarkGray),
         ),
     ])];
-    header_lines.extend(airport_animation(app.tick, scene_width, &wave_indicator));
+    header_lines.extend(airport_animation(app.tick, scene_width, &overall_indicator));
     header_lines.push(Line::from(vec![
         Span::styled(
             overall_symbol,
@@ -641,47 +520,18 @@ fn draw(f: &mut Frame, app: &mut App) {
     let board_width = chunks[1].width as usize;
     let mut board_lines: Vec<Line<'static>> = Vec::new();
 
-    let provider_defs: [(&str, &str); 3] = [
-        ("CLAUDE", "status.claude.com"),
-        ("OPENAI", "status.openai.com"),
-        ("APPLE DEVELOPER", "developer.apple.com/system-status"),
-    ];
-
     match &app.fetch_state {
         FetchState::Ok(all) => {
-            let results: [&Result<ProviderContent, String>; 3] =
-                [&all.claude, &all.openai, &all.apple];
-
-            for (idx, ((name, source), result)) in
-                provider_defs.iter().zip(results.iter()).enumerate()
-            {
+            if all.providers.is_empty() {
+                board_lines.push(Line::from(Span::styled(
+                    "  No providers configured. Run: five-nine add <name>",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            for (idx, (p, result)) in all.providers.iter().enumerate() {
                 if idx > 0 {
                     board_lines.push(Line::from(""));
                 }
-                board_lines.push(provider_header_line(name, source, board_width));
-
-                match result {
-                    Ok(content) => {
-                        if content.services.is_empty() {
-                            board_lines.push(Line::from(Span::styled(
-                                "  No components reported.",
-                                Style::default().fg(Color::DarkGray),
-                            )));
-                        } else {
-                            board_lines.extend(provider_lines(content, board_width));
-                        }
-                    }
-                    Err(e) => {
-                        board_lines.push(Line::from(Span::styled(
-                            format!("  ✗  {e}"),
-                            Style::default().fg(Color::Red),
-                        )));
-                    }
-                }
-            }
-
-            for (p, result) in &all.custom {
-                board_lines.push(Line::from(""));
                 board_lines.push(provider_header_line(&p.name, &p.source, board_width));
                 match result {
                     Ok(content) => {
@@ -856,23 +706,14 @@ async fn cmd_status(json: bool) -> Result<(), String> {
     };
 
     if json {
-        let mut out = serde_json::json!({
-            "claude":  provider_to_json(&all.claude),
-            "openai":  provider_to_json(&all.openai),
-            "apple":   provider_to_json(&all.apple),
-        });
-        for (p, result) in &all.custom {
-            out[p.name.to_lowercase()] = provider_to_json(result);
+        let mut out = serde_json::Map::new();
+        for (p, result) in &all.providers {
+            out.insert(p.name.to_lowercase(), provider_to_json(result));
         }
-        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        println!("{}", serde_json::to_string_pretty(&serde_json::Value::Object(out)).unwrap());
     } else {
-        print_provider_table("CLAUDE", "status.claude.com", &all.claude);
-        println!();
-        print_provider_table("OPENAI", "status.openai.com", &all.openai);
-        println!();
-        print_provider_table("APPLE DEVELOPER", "developer.apple.com/system-status", &all.apple);
-        for (p, result) in &all.custom {
-            println!();
+        for (i, (p, result)) in all.providers.iter().enumerate() {
+            if i > 0 { println!(); }
             print_provider_table(&p.name, &p.source, result);
         }
     }
@@ -975,16 +816,11 @@ fn cmd_remove(name: String) -> Result<(), String> {
 }
 
 fn cmd_list() {
-    println!("Built-in providers:");
-    println!("  CLAUDE           status.claude.com");
-    println!("  OPENAI           status.openai.com");
-    println!("  APPLE DEVELOPER  developer.apple.com/system-status");
-
     let config = load_config();
     if config.providers.is_empty() {
-        println!("\nNo custom providers. Add one with: five-nine add <name>");
+        println!("No providers configured. Add one with: five-nine add <name>");
     } else {
-        println!("\nCustom providers:");
+        println!("Monitored providers:");
         for p in &config.providers {
             println!("  {:<20} {}", p.name, p.source);
         }
@@ -1287,46 +1123,50 @@ mod tests {
         assert!(pct > 80.0, "expected >80% but got {pct}");
     }
 
-    // ── Apple service status ──────────────────────────────────────────────────
+    // ── worst_status ──────────────────────────────────────────────────────────
 
-    #[test]
-    fn apple_no_events_is_operational() {
-        assert_eq!(apple_service_status(&[]), "operational");
+    fn make_content(indicator: &str) -> ProviderContent {
+        ProviderContent {
+            indicator: indicator.to_string(),
+            description: format!("{indicator} desc"),
+            services: vec![],
+        }
     }
 
     #[test]
-    fn apple_resolved_event_is_operational() {
-        let event = AppleEvent {
-            event_status: "resolved".to_string(),
-            status_type: "outage".to_string(),
-            epoch_start_ms: 0,
-            epoch_end_ms: Some(1),
-        };
-        assert_eq!(apple_service_status(&[event]), "operational");
+    fn worst_status_empty_returns_all_ok() {
+        let (ind, _) = worst_status(&[]);
+        assert_eq!(ind, "none");
     }
 
     #[test]
-    fn apple_active_outage_is_major_outage() {
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        let event = AppleEvent {
-            event_status: "ongoing".to_string(),
-            status_type: "outage".to_string(),
-            epoch_start_ms: now_ms - 3_600_000,
-            epoch_end_ms: None,
-        };
-        assert_eq!(apple_service_status(&[event]), "major_outage");
+    fn worst_status_picks_most_severe() {
+        let providers = vec![
+            (make_provider("A"), Ok(make_content("none"))),
+            (make_provider("B"), Ok(make_content("minor"))),
+            (make_provider("C"), Ok(make_content("critical"))),
+        ];
+        let (ind, _) = worst_status(&providers);
+        assert_eq!(ind, "critical");
     }
 
     #[test]
-    fn apple_active_non_outage_is_degraded() {
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        let event = AppleEvent {
-            event_status: "ongoing".to_string(),
-            status_type: "performance".to_string(),
-            epoch_start_ms: now_ms - 3_600_000,
-            epoch_end_ms: None,
-        };
-        assert_eq!(apple_service_status(&[event]), "degraded_performance");
+    fn worst_status_ignores_errors() {
+        let providers = vec![
+            (make_provider("A"), Err("network error".to_string())),
+            (make_provider("B"), Ok(make_content("none"))),
+        ];
+        let (ind, _) = worst_status(&providers);
+        assert_eq!(ind, "none");
+    }
+
+    #[test]
+    fn worst_status_all_errors_returns_default() {
+        let providers = vec![
+            (make_provider("A"), Err("err".to_string())),
+        ];
+        let (ind, _) = worst_status(&providers);
+        assert_eq!(ind, "none");
     }
 
     // ── Network integration tests (skipped by default) ────────────────────────
@@ -1355,9 +1195,9 @@ mod tests {
 
     #[tokio::test]
     #[ignore]
-    async fn integration_fetch_all_builtin() {
-        let FetchState::Ok(all) = fetch_all(&[]).await else { panic!("unexpected state") };
-        assert!(all.claude.is_ok() || all.claude.is_err()); // just verifies it ran
-        assert!(all.custom.is_empty());
+    async fn integration_fetch_all_with_defaults() {
+        let providers = default_providers();
+        let FetchState::Ok(all) = fetch_all(&providers).await else { panic!("unexpected state") };
+        assert_eq!(all.providers.len(), providers.len());
     }
 }
