@@ -16,6 +16,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
+use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -662,10 +663,216 @@ fn draw(f: &mut Frame, app: &mut App) {
     );
 }
 
+// ── CLI definition ────────────────────────────────────────────────────────────
+
+#[derive(Parser)]
+#[command(
+    name = "five-nine",
+    version,
+    about = "AI service status monitor",
+    long_about = "Terminal UI for monitoring Claude, OpenAI, and Apple Developer service status in real time."
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Launch the TUI monitor (default)
+    Monitor,
+    /// Print current service status and exit
+    Status {
+        /// Output raw JSON instead of formatted text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check for a newer release and self-update if one is available
+    Update,
+}
+
+// ── Status command ────────────────────────────────────────────────────────────
+
+fn print_provider_table(name: &str, source: &str, result: &Result<ProviderContent, String>) {
+    match result {
+        Ok(c) => {
+            let sym = indicator_symbol(&c.indicator);
+            let color_code = match c.indicator.as_str() {
+                "none" | "operational" => "\x1b[32m",
+                "minor" | "degraded_performance" => "\x1b[33m",
+                _ => "\x1b[31m",
+            };
+            println!("{color_code}{sym}\x1b[0m  \x1b[1m{name}\x1b[0m  \x1b[2m{source}\x1b[0m");
+            for s in &c.services {
+                let sym = indicator_symbol(&s.status);
+                let label = status_label(&s.status);
+                let sc = match s.status.as_str() {
+                    "operational" => "\x1b[32m",
+                    "degraded_performance" => "\x1b[33m",
+                    _ => "\x1b[31m",
+                };
+                let uc = if s.uptime_pct >= 99.9 {
+                    "\x1b[32m"
+                } else if s.uptime_pct >= 99.0 {
+                    "\x1b[33m"
+                } else {
+                    "\x1b[31m"
+                };
+                println!(
+                    "  {sc}{sym}\x1b[0m  {:<38} {sc}{:<15}\x1b[0m {uc}{:>7.2}%\x1b[0m",
+                    s.name, label, s.uptime_pct
+                );
+            }
+        }
+        Err(e) => {
+            println!("\x1b[1m{name}\x1b[0m  \x1b[2m{source}\x1b[0m");
+            println!("  \x1b[31m✗\x1b[0m  {e}");
+        }
+    }
+}
+
+fn provider_to_json(result: &Result<ProviderContent, String>) -> serde_json::Value {
+    match result {
+        Ok(c) => serde_json::json!({
+            "indicator": c.indicator,
+            "description": c.description,
+            "services": c.services.iter().map(|s| serde_json::json!({
+                "name": s.name,
+                "status": s.status,
+                "uptime_pct": (s.uptime_pct * 100.0).round() / 100.0,
+            })).collect::<Vec<_>>(),
+        }),
+        Err(e) => serde_json::json!({ "error": e }),
+    }
+}
+
+async fn cmd_status(json: bool) -> Result<(), String> {
+    if !json {
+        eprintln!("Fetching…");
+    }
+    let FetchState::Ok(all) = fetch_all().await else {
+        unreachable!()
+    };
+
+    if json {
+        let out = serde_json::json!({
+            "claude":  provider_to_json(&all.claude),
+            "openai":  provider_to_json(&all.openai),
+            "apple":   provider_to_json(&all.apple),
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    } else {
+        print_provider_table("CLAUDE", "status.claude.com", &all.claude);
+        println!();
+        print_provider_table("OPENAI", "status.openai.com", &all.openai);
+        println!();
+        print_provider_table("APPLE DEVELOPER", "developer.apple.com/system-status", &all.apple);
+    }
+    Ok(())
+}
+
+// ── Self-update ───────────────────────────────────────────────────────────────
+
+async fn cmd_update() -> Result<(), String> {
+    println!("Checking for updates…");
+
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("five-nine/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let release: serde_json::Value = client
+        .get("https://api.github.com/repos/KKodiac/five-nine/releases/latest")
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("Parse error: {e}"))?;
+
+    let latest = release["tag_name"]
+        .as_str()
+        .ok_or("Missing tag_name in API response")?
+        .trim_start_matches('v');
+
+    let current = env!("CARGO_PKG_VERSION");
+
+    if latest == current {
+        println!("Already up to date (v{current}).");
+        return Ok(());
+    }
+
+    println!("Updating v{current} → v{latest}…");
+
+    let arch = std::env::consts::ARCH; // "aarch64" or "x86_64"
+    let asset_name = format!("five-nine-{arch}-apple-darwin");
+
+    let assets = release["assets"].as_array().ok_or("No assets in release")?;
+    let asset = assets
+        .iter()
+        .find(|a| a["name"].as_str() == Some(asset_name.as_str()))
+        .ok_or_else(|| format!("Asset '{asset_name}' not found in release"))?;
+
+    let url = asset["browser_download_url"]
+        .as_str()
+        .ok_or("Missing download URL")?;
+
+    println!("Downloading {asset_name}…");
+
+    let bytes = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Download error: {e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("Read error: {e}"))?;
+
+    let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let tmp_path = current_exe.with_extension("update-tmp");
+
+    std::fs::write(&tmp_path, &bytes)
+        .map_err(|e| format!("Write error: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("chmod error: {e}"))?;
+    }
+
+    std::fs::rename(&tmp_path, &current_exe)
+        .map_err(|e| format!("Replace error (try sudo?): {e}"))?;
+
+    println!("Updated to v{latest}.");
+    Ok(())
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(Commands::Update) => {
+            if let Err(e) = cmd_update().await {
+                eprintln!("Update failed: {e}");
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        Some(Commands::Status { json }) => {
+            if let Err(e) = cmd_status(json).await {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        // `monitor` (explicit) or bare invocation — fall through to TUI
+        Some(Commands::Monitor) | None => {}
+    }
+
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
