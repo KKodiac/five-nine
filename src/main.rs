@@ -153,21 +153,27 @@ fn config_path() -> PathBuf {
     PathBuf::from(home).join(".config").join("five-nine").join("providers.json")
 }
 
-fn load_config() -> Config {
-    let path = config_path();
-    std::fs::read_to_string(&path)
+fn load_config_from(path: &PathBuf) -> Config {
+    std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-fn save_config(config: &Config) -> Result<(), String> {
-    let path = config_path();
+fn save_config_to(config: &Config, path: &PathBuf) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())
+    std::fs::write(path, json).map_err(|e| e.to_string())
+}
+
+fn load_config() -> Config {
+    load_config_from(&config_path())
+}
+
+fn save_config(config: &Config) -> Result<(), String> {
+    save_config_to(config, &config_path())
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -1142,4 +1148,216 @@ async fn main() -> std::io::Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("five-nine-test-{}-{}.json", tag, std::process::id()))
+    }
+
+    fn make_provider(name: &str) -> CustomProvider {
+        CustomProvider {
+            name: name.to_string(),
+            source: format!("status.{}.com", name.to_lowercase()),
+            summary_url: format!("https://status.{}.com/api/v2/summary.json", name.to_lowercase()),
+            incidents_url: format!("https://status.{}.com/api/v2/incidents.json", name.to_lowercase()),
+        }
+    }
+
+    // ── Config serialization ──────────────────────────────────────────────────
+
+    #[test]
+    fn config_round_trip() {
+        let config = Config { providers: vec![make_provider("GITHUB")] };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.providers.len(), 1);
+        assert_eq!(back.providers[0].name, "GITHUB");
+        assert_eq!(back.providers[0].source, "status.github.com");
+    }
+
+    #[test]
+    fn config_empty_json_gives_default() {
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert!(config.providers.is_empty());
+    }
+
+    #[test]
+    fn config_missing_file_gives_default() {
+        let path = tmp_path("missing");
+        // Don't create the file — load_config_from should return default
+        let config = load_config_from(&path);
+        assert!(config.providers.is_empty());
+    }
+
+    // ── Config persistence ────────────────────────────────────────────────────
+
+    #[test]
+    fn save_and_load_round_trip() {
+        let path = tmp_path("save-load");
+        let config = Config { providers: vec![make_provider("STRIPE"), make_provider("VERCEL")] };
+        save_config_to(&config, &path).unwrap();
+        let loaded = load_config_from(&path);
+        assert_eq!(loaded.providers.len(), 2);
+        assert_eq!(loaded.providers[0].name, "STRIPE");
+        assert_eq!(loaded.providers[1].name, "VERCEL");
+        std::fs::remove_file(&path).ok();
+    }
+
+    // ── Duplicate detection ───────────────────────────────────────────────────
+
+    #[test]
+    fn duplicate_provider_detected() {
+        let config = Config { providers: vec![make_provider("GITHUB")] };
+        assert!(config.providers.iter().any(|p| p.name == "GITHUB"));
+    }
+
+    #[test]
+    fn non_duplicate_not_detected() {
+        let config = Config { providers: vec![make_provider("GITHUB")] };
+        assert!(!config.providers.iter().any(|p| p.name == "STRIPE"));
+    }
+
+    // ── Remove logic ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn remove_existing_provider() {
+        let path = tmp_path("remove-existing");
+        let config = Config { providers: vec![make_provider("GITHUB"), make_provider("STRIPE")] };
+        save_config_to(&config, &path).unwrap();
+
+        let mut loaded = load_config_from(&path);
+        let before = loaded.providers.len();
+        loaded.providers.retain(|p| p.name != "GITHUB");
+        assert_eq!(loaded.providers.len(), before - 1);
+        assert_eq!(loaded.providers[0].name, "STRIPE");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn remove_nonexistent_provider_is_noop() {
+        let config = Config { providers: vec![make_provider("GITHUB")] };
+        let mut providers = config.providers.clone();
+        providers.retain(|p| p.name != "NONEXISTENT");
+        assert_eq!(providers.len(), 1);
+    }
+
+    // ── Uptime calculation ────────────────────────────────────────────────────
+
+    #[test]
+    fn uptime_no_incidents_is_empty_map() {
+        let result = compute_uptime_from_incidents(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn uptime_old_incident_outside_window_is_ignored() {
+        // An incident that resolved 200 days ago is outside the 90-day window
+        let start = chrono::Utc::now() - chrono::Duration::days(200);
+        let end = start + chrono::Duration::hours(1);
+        let incident = Incident {
+            created_at: start.to_rfc3339(),
+            resolved_at: Some(end.to_rfc3339()),
+            components: vec![IncidentComponent { name: "API".to_string() }],
+        };
+        let result = compute_uptime_from_incidents(&[incident]);
+        // Either not in map (100% uptime) or very high
+        let pct = result.get("API").copied().unwrap_or(100.0);
+        assert!(pct > 99.99, "expected ~100% but got {pct}");
+    }
+
+    #[test]
+    fn uptime_recent_long_incident_lowers_percentage() {
+        // A 9-day outage inside the 90-day window lowers uptime by ~10%
+        let start = chrono::Utc::now() - chrono::Duration::days(10);
+        let end = start + chrono::Duration::days(9);
+        let incident = Incident {
+            created_at: start.to_rfc3339(),
+            resolved_at: Some(end.to_rfc3339()),
+            components: vec![IncidentComponent { name: "API".to_string() }],
+        };
+        let result = compute_uptime_from_incidents(&[incident]);
+        let pct = result.get("API").copied().unwrap_or(100.0);
+        assert!(pct < 95.0, "expected <95% but got {pct}");
+        assert!(pct > 80.0, "expected >80% but got {pct}");
+    }
+
+    // ── Apple service status ──────────────────────────────────────────────────
+
+    #[test]
+    fn apple_no_events_is_operational() {
+        assert_eq!(apple_service_status(&[]), "operational");
+    }
+
+    #[test]
+    fn apple_resolved_event_is_operational() {
+        let event = AppleEvent {
+            event_status: "resolved".to_string(),
+            status_type: "outage".to_string(),
+            epoch_start_ms: 0,
+            epoch_end_ms: Some(1),
+        };
+        assert_eq!(apple_service_status(&[event]), "operational");
+    }
+
+    #[test]
+    fn apple_active_outage_is_major_outage() {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let event = AppleEvent {
+            event_status: "ongoing".to_string(),
+            status_type: "outage".to_string(),
+            epoch_start_ms: now_ms - 3_600_000,
+            epoch_end_ms: None,
+        };
+        assert_eq!(apple_service_status(&[event]), "major_outage");
+    }
+
+    #[test]
+    fn apple_active_non_outage_is_degraded() {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let event = AppleEvent {
+            event_status: "ongoing".to_string(),
+            status_type: "performance".to_string(),
+            epoch_start_ms: now_ms - 3_600_000,
+            epoch_end_ms: None,
+        };
+        assert_eq!(apple_service_status(&[event]), "degraded_performance");
+    }
+
+    // ── Network integration tests (skipped by default) ────────────────────────
+
+    #[tokio::test]
+    #[ignore]
+    async fn integration_fetch_claude_status() {
+        let result = fetch_statuspage(
+            "https://status.claude.com/api/v2/summary.json",
+            "https://status.claude.com/api/v2/incidents.json",
+        ).await;
+        assert!(result.is_ok(), "fetch failed: {:?}", result.err());
+        let c = result.unwrap();
+        assert!(!c.indicator.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn integration_fetch_github_status() {
+        let result = fetch_statuspage(
+            "https://status.github.com/api/v2/summary.json",
+            "https://status.github.com/api/v2/incidents.json",
+        ).await;
+        assert!(result.is_ok(), "fetch failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn integration_fetch_all_builtin() {
+        let FetchState::Ok(all) = fetch_all(&[]).await else { panic!("unexpected state") };
+        assert!(all.claude.is_ok() || all.claude.is_err()); // just verifies it ran
+        assert!(all.custom.is_empty());
+    }
 }
