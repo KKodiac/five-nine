@@ -81,6 +81,13 @@ cargo build --release
 ./target/release/five-nine
 ```
 
+## Development
+
+```bash
+cargo test                   # unit tests (offline, fast)
+cargo test -- --ignored      # integration tests (requires network)
+```
+
 ## License
 
 MIT
