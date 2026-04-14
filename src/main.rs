@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,7 +18,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 use clap::{Parser, Subcommand};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -128,6 +129,45 @@ struct AllProviders {
     claude: Result<ProviderContent, String>,
     openai: Result<ProviderContent, String>,
     apple: Result<ProviderContent, String>,
+    custom: Vec<(CustomProvider, Result<ProviderContent, String>)>,
+}
+
+// ── Custom provider config ────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Clone)]
+struct CustomProvider {
+    name: String,    // display label e.g. "GITHUB"
+    source: String,  // human-readable domain e.g. "www.githubstatus.com"
+    summary_url: String,
+    incidents_url: String,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct Config {
+    #[serde(default)]
+    providers: Vec<CustomProvider>,
+}
+
+fn config_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".config").join("five-nine").join("providers.json")
+}
+
+fn load_config() -> Config {
+    let path = config_path();
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_config(config: &Config) -> Result<(), String> {
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -351,14 +391,30 @@ async fn fetch_apple() -> Result<ProviderContent, String> {
     Ok(normalize_apple(parsed.services))
 }
 
-async fn fetch_all() -> FetchState {
+async fn fetch_all(custom_providers: &[CustomProvider]) -> FetchState {
     let (claude, openai, apple) = tokio::join!(
         fetch_statuspage(CLAUDE_SUMMARY_URL, CLAUDE_INCIDENTS_URL),
         fetch_statuspage(OPENAI_SUMMARY_URL, OPENAI_INCIDENTS_URL),
         fetch_apple(),
     );
 
-    FetchState::Ok(Arc::new(AllProviders { claude, openai, apple }))
+    // Fetch custom providers concurrently via JoinSet
+    let mut set = tokio::task::JoinSet::new();
+    for (i, p) in custom_providers.iter().cloned().enumerate() {
+        set.spawn(async move {
+            let result = fetch_statuspage(&p.summary_url, &p.incidents_url).await;
+            (i, p, result)
+        });
+    }
+    let mut custom_unsorted: Vec<(usize, CustomProvider, Result<ProviderContent, String>)> =
+        Vec::new();
+    while let Some(Ok(entry)) = set.join_next().await {
+        custom_unsorted.push(entry);
+    }
+    custom_unsorted.sort_by_key(|(i, _, _)| *i);
+    let custom = custom_unsorted.into_iter().map(|(_, p, r)| (p, r)).collect();
+
+    FetchState::Ok(Arc::new(AllProviders { claude, openai, apple, custom }))
 }
 
 // ── Rendering helpers ─────────────────────────────────────────────────────────
@@ -617,6 +673,29 @@ fn draw(f: &mut Frame, app: &mut App) {
                     }
                 }
             }
+
+            for (p, result) in &all.custom {
+                board_lines.push(Line::from(""));
+                board_lines.push(provider_header_line(&p.name, &p.source, board_width));
+                match result {
+                    Ok(content) => {
+                        if content.services.is_empty() {
+                            board_lines.push(Line::from(Span::styled(
+                                "  No components reported.",
+                                Style::default().fg(Color::DarkGray),
+                            )));
+                        } else {
+                            board_lines.extend(provider_lines(content, board_width));
+                        }
+                    }
+                    Err(e) => {
+                        board_lines.push(Line::from(Span::styled(
+                            format!("  ✗  {e}"),
+                            Style::default().fg(Color::Red),
+                        )));
+                    }
+                }
+            }
         }
         FetchState::Loading => {
             board_lines.push(Line::from(Span::styled(
@@ -687,6 +766,21 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Add a provider to monitor (auto-discovers Statuspage API)
+    Add {
+        /// Application name to search for (e.g. github, vercel, stripe)
+        name: String,
+        /// Override with a direct status-page base URL
+        #[arg(long)]
+        url: Option<String>,
+    },
+    /// Remove a custom provider
+    Remove {
+        /// Display name of the provider to remove (case-insensitive)
+        name: String,
+    },
+    /// List all monitored providers
+    List,
     /// Check for a newer release and self-update if one is available
     Update,
 }
@@ -750,16 +844,20 @@ async fn cmd_status(json: bool) -> Result<(), String> {
     if !json {
         eprintln!("Fetching…");
     }
-    let FetchState::Ok(all) = fetch_all().await else {
+    let config = load_config();
+    let FetchState::Ok(all) = fetch_all(&config.providers).await else {
         unreachable!()
     };
 
     if json {
-        let out = serde_json::json!({
+        let mut out = serde_json::json!({
             "claude":  provider_to_json(&all.claude),
             "openai":  provider_to_json(&all.openai),
             "apple":   provider_to_json(&all.apple),
         });
+        for (p, result) in &all.custom {
+            out[p.name.to_lowercase()] = provider_to_json(result);
+        }
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
     } else {
         print_provider_table("CLAUDE", "status.claude.com", &all.claude);
@@ -767,8 +865,124 @@ async fn cmd_status(json: bool) -> Result<(), String> {
         print_provider_table("OPENAI", "status.openai.com", &all.openai);
         println!();
         print_provider_table("APPLE DEVELOPER", "developer.apple.com/system-status", &all.apple);
+        for (p, result) in &all.custom {
+            println!();
+            print_provider_table(&p.name, &p.source, result);
+        }
     }
     Ok(())
+}
+
+// ── Provider management commands ──────────────────────────────────────────────
+
+async fn cmd_add(name: String, url: Option<String>) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("five-nine/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let (summary_url, incidents_url, source) = if let Some(provided) = url {
+        // Strip trailing slash and any existing /api/v2/summary.json suffix
+        let base = provided
+            .trim_end_matches('/')
+            .trim_end_matches("/api/v2/summary.json");
+        let summary = format!("{base}/api/v2/summary.json");
+        let incidents = format!("{base}/api/v2/incidents.json");
+        let source = base
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .to_string();
+
+        println!("Verifying {summary}…");
+        client
+            .get(&summary)
+            .send()
+            .await
+            .map_err(|e| format!("Network error: {e}"))?
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|_| format!("'{summary}' does not look like a Statuspage v2 API"))?;
+
+        (summary, incidents, source)
+    } else {
+        let slug = name.to_lowercase();
+        println!("Searching for {name} status page…");
+
+        let candidates = [
+            format!("https://status.{slug}.com"),
+            format!("https://{slug}status.com"),
+            format!("https://{slug}.statuspage.io"),
+            format!("https://status.{slug}.io"),
+            format!("https://{slug}.status.io"),
+        ];
+
+        let mut found = None;
+        for base in &candidates {
+            let summary = format!("{base}/api/v2/summary.json");
+            println!("  Trying {summary}…");
+            if let Ok(resp) = client.get(&summary).send().await {
+                if resp.status().is_success() {
+                    if resp.json::<serde_json::Value>().await.is_ok() {
+                        let source = base
+                            .trim_start_matches("https://")
+                            .trim_start_matches("http://")
+                            .to_string();
+                        found = Some((summary, format!("{base}/api/v2/incidents.json"), source));
+                        break;
+                    }
+                }
+            }
+        }
+
+        found.ok_or_else(|| {
+            format!(
+                "Could not auto-discover a Statuspage API for '{name}'.\n\
+                 Try: five-nine add {name} --url <status-page-url>"
+            )
+        })?
+    };
+
+    let mut config = load_config();
+    let display = name.to_uppercase();
+
+    if config.providers.iter().any(|p| p.name == display) {
+        return Err(format!("'{display}' is already in your provider list"));
+    }
+
+    config.providers.push(CustomProvider { name: display.clone(), source, summary_url, incidents_url });
+    save_config(&config)?;
+    println!("Added {display}.");
+    Ok(())
+}
+
+fn cmd_remove(name: String) -> Result<(), String> {
+    let mut config = load_config();
+    let display = name.to_uppercase();
+    let before = config.providers.len();
+    config.providers.retain(|p| p.name != display);
+    if config.providers.len() == before {
+        return Err(format!("'{display}' not found. Run `five-nine list` to see custom providers."));
+    }
+    save_config(&config)?;
+    println!("Removed {display}.");
+    Ok(())
+}
+
+fn cmd_list() {
+    println!("Built-in providers:");
+    println!("  CLAUDE           status.claude.com");
+    println!("  OPENAI           status.openai.com");
+    println!("  APPLE DEVELOPER  developer.apple.com/system-status");
+
+    let config = load_config();
+    if config.providers.is_empty() {
+        println!("\nNo custom providers. Add one with: five-nine add <name>");
+    } else {
+        println!("\nCustom providers:");
+        for p in &config.providers {
+            println!("  {:<20} {}", p.name, p.source);
+        }
+    }
 }
 
 // ── Self-update ───────────────────────────────────────────────────────────────
@@ -856,20 +1070,22 @@ async fn main() -> std::io::Result<()> {
 
     match cli.command {
         Some(Commands::Update) => {
-            if let Err(e) = cmd_update().await {
-                eprintln!("Update failed: {e}");
-                std::process::exit(1);
-            }
+            if let Err(e) = cmd_update().await { eprintln!("Error: {e}"); std::process::exit(1); }
             return Ok(());
         }
         Some(Commands::Status { json }) => {
-            if let Err(e) = cmd_status(json).await {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
-            }
+            if let Err(e) = cmd_status(json).await { eprintln!("Error: {e}"); std::process::exit(1); }
             return Ok(());
         }
-        // `monitor` (explicit) or bare invocation — fall through to TUI
+        Some(Commands::Add { name, url }) => {
+            if let Err(e) = cmd_add(name, url).await { eprintln!("Error: {e}"); std::process::exit(1); }
+            return Ok(());
+        }
+        Some(Commands::Remove { name }) => {
+            if let Err(e) = cmd_remove(name) { eprintln!("Error: {e}"); std::process::exit(1); }
+            return Ok(());
+        }
+        Some(Commands::List) => { cmd_list(); return Ok(()); }
         Some(Commands::Monitor) | None => {}
     }
 
@@ -892,8 +1108,9 @@ async fn main() -> std::io::Result<()> {
         if app.should_refresh() {
             app.fetching = true;
             let tx = tx.clone();
+            let custom = load_config().providers;
             tokio::spawn(async move {
-                if let FetchState::Ok(p) = fetch_all().await {
+                if let FetchState::Ok(p) = fetch_all(&custom).await {
                     let _ = tx.send(p).await;
                 }
             });
