@@ -3,7 +3,7 @@
 Monitor any [Atlassian Statuspage](https://www.atlassian.com/software/statuspage) service from your terminal — live status, 90-day uptime, and an animated dashboard that reacts to the worst current incident across all your providers.
 
 ![Rust](https://img.shields.io/badge/rust-2024-orange)
-![Version](https://img.shields.io/badge/version-0.2.4-blue)
+![Version](https://img.shields.io/badge/version-0.2.5-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 ## Features
@@ -13,6 +13,7 @@ Monitor any [Atlassian Statuspage](https://www.atlassian.com/software/statuspage
 - **90-day uptime** percentage per service component
 - **Airport animation** — departing planes and ATC tower; color tracks worst active incident
 - **Scrollable board** — works on any terminal height
+- **Desktop notifications** — macOS alert when any provider degrades or recovers
 - **Scriptable** — `five-nine status` and `five-nine status --json` for pipelines and alerting
 - **Self-updating** — `five-nine update` downloads the latest binary in place
 - Auto-refreshes every 30 seconds
