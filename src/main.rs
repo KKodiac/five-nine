@@ -172,6 +172,8 @@ struct App {
     fetching: bool,
     scroll: u16,
     board_line_count: u16,
+    /// Tracks the last known indicator per provider name so we can diff on each fetch.
+    prev_indicators: HashMap<String, String>,
 }
 
 impl App {
@@ -184,6 +186,7 @@ impl App {
             fetching: false,
             scroll: 0,
             board_line_count: 0,
+            prev_indicators: HashMap::new(),
         }
     }
 
@@ -216,6 +219,66 @@ impl App {
         self.last_checked_at = Some(Local::now().format("%H:%M:%S").to_string());
         self.fetching = false;
     }
+
+    /// Diff the new fetch result against `prev_indicators` and fire a macOS
+    /// notification whenever a provider degrades or recovers.
+    fn check_and_notify(&mut self, new_providers: &AllProviders) {
+        for (p, result) in &new_providers.providers {
+            let new_indicator = match result {
+                Ok(c) => c.indicator.as_str(),
+                Err(_) => continue,
+            };
+
+            let prev = self
+                .prev_indicators
+                .get(&p.name)
+                .map(|s| s.as_str())
+                .unwrap_or("none");
+
+            let prev_rank = indicator_rank(prev);
+            let new_rank = indicator_rank(new_indicator);
+
+            if new_rank > prev_rank {
+                // Status got worse
+                let desc = result
+                    .as_ref()
+                    .ok()
+                    .map(|c| c.description.as_str())
+                    .unwrap_or(new_indicator);
+                notify(&format!("{} Status Alert", p.name), &p.source, desc);
+            } else if prev_rank > 0 && new_rank == 0 {
+                // Recovered
+                notify(
+                    &format!("{} Recovered", p.name),
+                    &p.source,
+                    "All systems operational",
+                );
+            }
+
+            self.prev_indicators
+                .insert(p.name.clone(), new_indicator.to_string());
+        }
+    }
+}
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+
+/// Fire a native macOS notification via `osascript`.
+/// Silently no-ops if osascript is unavailable (non-macOS or sandboxed).
+fn notify(title: &str, subtitle: &str, body: &str) {
+    fn quote(s: &str) -> String {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+    let script = format!(
+        "display notification {} with title {} subtitle {}",
+        quote(body),
+        quote(title),
+        quote(subtitle),
+    );
+    let _ = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .spawn();
 }
 
 // ── Fetch helpers ─────────────────────────────────────────────────────────────
@@ -1003,6 +1066,7 @@ async fn main() -> std::io::Result<()> {
     loop {
         // Receive completed fetch without blocking
         if let Ok(providers) = rx.try_recv() {
+            app.check_and_notify(&providers);
             app.apply(providers);
         }
 
