@@ -735,6 +735,8 @@ enum Commands {
     List,
     /// Check for a newer release and self-update if one is available
     Update,
+    /// Remove the five-nine binary and all configuration
+    Uninstall,
 }
 
 // ── Status command ────────────────────────────────────────────────────────────
@@ -1012,6 +1014,48 @@ async fn cmd_update() -> Result<(), String> {
     Ok(())
 }
 
+// ── Uninstall ─────────────────────────────────────────────────────────────────
+
+fn cmd_uninstall() -> Result<(), String> {
+    use std::io::{Write, stdin, stdout};
+
+    let config_dir = {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        PathBuf::from(home).join(".config").join("five-nine")
+    };
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+
+    println!("This will permanently remove:");
+    if config_dir.exists() {
+        println!("  {}", config_dir.display());
+    }
+    println!("  {}", exe.display());
+    print!("\nContinue? [y/N] ");
+    stdout().flush().map_err(|e| e.to_string())?;
+
+    let mut input = String::new();
+    stdin().read_line(&mut input).map_err(|e| e.to_string())?;
+
+    if input.trim().to_lowercase() != "y" {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    if config_dir.exists() {
+        std::fs::remove_dir_all(&config_dir)
+            .map_err(|e| format!("Could not remove {}: {e}", config_dir.display()))?;
+        println!("Removed {}", config_dir.display());
+    }
+
+    // On Unix the binary can be unlinked while running; the process keeps its
+    // inode until it exits, so this is safe.
+    std::fs::remove_file(&exe)
+        .map_err(|e| format!("Could not remove {}: {e}\nTry: sudo rm {}", exe.display(), exe.display()))?;
+    println!("Removed {}", exe.display());
+    println!("five-nine uninstalled.");
+    Ok(())
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -1049,6 +1093,13 @@ async fn main() -> std::io::Result<()> {
         }
         Some(Commands::List) => {
             cmd_list();
+            return Ok(());
+        }
+        Some(Commands::Uninstall) => {
+            if let Err(e) = cmd_uninstall() {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
             return Ok(());
         }
         Some(Commands::Monitor) | None => {}

@@ -3,7 +3,7 @@
 Monitor any [Atlassian Statuspage](https://www.atlassian.com/software/statuspage) service from your terminal — live status, 90-day uptime, and an animated dashboard that reacts to the worst current incident across all your providers.
 
 ![Rust](https://img.shields.io/badge/rust-2024-orange)
-![Version](https://img.shields.io/badge/version-0.2.5-blue)
+![Version](https://img.shields.io/badge/version-0.2.6-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 ## Features
@@ -49,6 +49,7 @@ five-nine
 | `five-nine remove <name>` | Remove a provider |
 | `five-nine list` | List all configured providers |
 | `five-nine update` | Self-update to the latest release |
+| `five-nine uninstall` | Remove the binary and all configuration |
 | `five-nine --version` | Print version |
 | `five-nine --help` | Print help |
 
