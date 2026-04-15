@@ -1,3 +1,4 @@
+
 # five-nine
 
 Monitor any [Atlassian Statuspage](https://www.atlassian.com/software/statuspage) service from your terminal — live status, 90-day uptime, and an animated dashboard that reacts to the worst current incident across all your providers.
@@ -5,6 +6,8 @@ Monitor any [Atlassian Statuspage](https://www.atlassian.com/software/statuspage
 ![Rust](https://img.shields.io/badge/rust-2024-orange)
 ![Version](https://img.shields.io/badge/version-0.2.6-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
+
+<img width="703" height="629" alt="Screen Recording 2026-04-15 at 3 38 07 PM" src="https://github.com/user-attachments/assets/c69372ce-dfb5-4315-bebf-f8bfbe928fcb" />
 
 ## Features
 
