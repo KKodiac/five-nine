@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, Utc};
+use clap::{Parser, Subcommand};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -17,7 +18,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
-use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -88,8 +88,8 @@ struct AllProviders {
 
 #[derive(Serialize, Deserialize, Clone)]
 struct CustomProvider {
-    name: String,    // display label e.g. "GITHUB"
-    source: String,  // human-readable domain e.g. "www.githubstatus.com"
+    name: String,   // display label e.g. "GITHUB"
+    source: String, // human-readable domain e.g. "www.githubstatus.com"
     summary_url: String,
     incidents_url: String,
 }
@@ -102,7 +102,10 @@ struct Config {
 
 fn config_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".config").join("five-nine").join("providers.json")
+    PathBuf::from(home)
+        .join(".config")
+        .join("five-nine")
+        .join("providers.json")
 }
 
 fn load_config_from(path: &PathBuf) -> Config {
@@ -143,7 +146,9 @@ fn load_config() -> Config {
         return load_config_from(&path);
     }
     // First run: seed defaults and persist so users can edit freely
-    let config = Config { providers: default_providers() };
+    let config = Config {
+        providers: default_providers(),
+    };
     let _ = save_config_to(&config, &path);
     config
 }
@@ -196,7 +201,9 @@ impl App {
     }
 
     fn should_refresh(&self) -> bool {
-        if self.fetching { return false; }
+        if self.fetching {
+            return false;
+        }
         match self.last_fetched {
             None => true,
             Some(t) => t.elapsed() >= REFRESH_INTERVAL,
@@ -220,7 +227,9 @@ fn compute_uptime_from_incidents(incidents: &[Incident]) -> HashMap<String, f64>
     let mut downtime: HashMap<String, f64> = HashMap::new();
 
     for inc in incidents {
-        let Ok(start_dt) = DateTime::parse_from_rfc3339(&inc.created_at) else { continue };
+        let Ok(start_dt) = DateTime::parse_from_rfc3339(&inc.created_at) else {
+            continue;
+        };
         let start = start_dt.with_timezone(&Utc);
         let end = inc
             .resolved_at
@@ -230,7 +239,9 @@ fn compute_uptime_from_incidents(incidents: &[Incident]) -> HashMap<String, f64>
             .unwrap_or(now);
         let eff_start = start.max(window_start);
         let eff_end = end.min(now);
-        if eff_end <= eff_start { continue; }
+        if eff_end <= eff_start {
+            continue;
+        }
         let dur = (eff_end - eff_start).num_seconds() as f64;
         for comp in &inc.components {
             *downtime.entry(comp.name.clone()).or_insert(0.0) += dur;
@@ -266,10 +277,7 @@ async fn fetch_statuspage(
     summary_url: &str,
     incidents_url: &str,
 ) -> Result<ProviderContent, String> {
-    let (sum_res, inc_res) = tokio::join!(
-        reqwest::get(summary_url),
-        reqwest::get(incidents_url),
-    );
+    let (sum_res, inc_res) = tokio::join!(reqwest::get(summary_url), reqwest::get(incidents_url),);
 
     let summary = sum_res
         .map_err(|e| format!("Network error: {e}"))?
@@ -309,16 +317,18 @@ async fn fetch_all(providers: &[CustomProvider]) -> FetchState {
 
 fn indicator_rank(s: &str) -> u8 {
     match s {
-        "critical" | "major_outage"      => 4,
-        "major"    | "partial_outage"    => 3,
-        "minor"    | "degraded_performance" => 2,
-        "under_maintenance"              => 1,
-        _                                => 0,
+        "critical" | "major_outage" => 4,
+        "major" | "partial_outage" => 3,
+        "minor" | "degraded_performance" => 2,
+        "under_maintenance" => 1,
+        _ => 0,
     }
 }
 
 /// Returns the (indicator, description) of the worst-off provider.
-fn worst_status(providers: &[(CustomProvider, Result<ProviderContent, String>)]) -> (String, String) {
+fn worst_status(
+    providers: &[(CustomProvider, Result<ProviderContent, String>)],
+) -> (String, String) {
     providers
         .iter()
         .filter_map(|(_, r)| r.as_ref().ok())
@@ -351,17 +361,23 @@ fn indicator_symbol(indicator: &str) -> &'static str {
 
 fn status_label(status: &str) -> &'static str {
     match status {
-        "operational"          => "OPERATIONAL",
+        "operational" => "OPERATIONAL",
         "degraded_performance" => "DEGRADED",
-        "partial_outage"       => "PARTIAL OUTAGE",
-        "major_outage"         => "MAJOR OUTAGE",
-        "under_maintenance"    => "MAINTENANCE",
-        _                      => "UNKNOWN",
+        "partial_outage" => "PARTIAL OUTAGE",
+        "major_outage" => "MAJOR OUTAGE",
+        "under_maintenance" => "MAINTENANCE",
+        _ => "UNKNOWN",
     }
 }
 
 fn uptime_color(pct: f64) -> Color {
-    if pct >= 99.9 { Color::Green } else if pct >= 99.0 { Color::Yellow } else { Color::LightRed }
+    if pct >= 99.9 {
+        Color::Green
+    } else if pct >= 99.0 {
+        Color::Yellow
+    } else {
+        Color::LightRed
+    }
 }
 
 /// Airport animation: departing planes cross the sky; an arriving plane rolls
@@ -457,7 +473,12 @@ fn provider_header_line(name: &str, source: &str, width: usize) -> Line<'static>
     let suffix = format!(" {source}");
     let dashes = width.saturating_sub(prefix.len() + suffix.len());
     Line::from(vec![
-        Span::styled(prefix, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            prefix,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("─".repeat(dashes), Style::default().fg(Color::DarkGray)),
         Span::styled(suffix, Style::default().fg(Color::DarkGray)),
     ])
@@ -492,7 +513,9 @@ fn draw(f: &mut Frame, app: &mut App) {
     let mut header_lines: Vec<Line<'static>> = vec![Line::from(vec![
         Span::styled(
             "five-nine",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             "  ·  AI Service Status",
@@ -503,12 +526,16 @@ fn draw(f: &mut Frame, app: &mut App) {
     header_lines.push(Line::from(vec![
         Span::styled(
             overall_symbol,
-            Style::default().fg(overall_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(overall_color)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(
             overall_desc.to_uppercase(),
-            Style::default().fg(overall_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(overall_color)
+                .add_modifier(Modifier::BOLD),
         ),
     ]));
     f.render_widget(
@@ -579,17 +606,23 @@ fn draw(f: &mut Frame, app: &mut App) {
             Span::styled(checked_str, Style::default().fg(Color::DarkGray)),
             Span::styled(
                 "r",
-                Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" refresh  ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 "↑↓",
-                Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" scroll  ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 "q",
-                Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" quit", Style::default().fg(Color::DarkGray)),
         ]))
@@ -710,10 +743,15 @@ async fn cmd_status(json: bool) -> Result<(), String> {
         for (p, result) in &all.providers {
             out.insert(p.name.to_lowercase(), provider_to_json(result));
         }
-        println!("{}", serde_json::to_string_pretty(&serde_json::Value::Object(out)).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::Value::Object(out)).unwrap()
+        );
     } else {
         for (i, (p, result)) in all.providers.iter().enumerate() {
-            if i > 0 { println!(); }
+            if i > 0 {
+                println!();
+            }
             print_provider_table(&p.name, &p.source, result);
         }
     }
@@ -767,17 +805,18 @@ async fn cmd_add(name: String, url: Option<String>) -> Result<(), String> {
         for base in &candidates {
             let summary = format!("{base}/api/v2/summary.json");
             println!("  Trying {summary}…");
-            if let Ok(resp) = client.get(&summary).send().await {
-                if resp.status().is_success() {
-                    if resp.json::<serde_json::Value>().await.is_ok() {
-                        let source = base
-                            .trim_start_matches("https://")
-                            .trim_start_matches("http://")
-                            .to_string();
-                        found = Some((summary, format!("{base}/api/v2/incidents.json"), source));
-                        break;
-                    }
-                }
+            let ok = if let Ok(resp) = client.get(&summary).send().await {
+                resp.status().is_success() && resp.json::<serde_json::Value>().await.is_ok()
+            } else {
+                false
+            };
+            if ok {
+                let source = base
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .to_string();
+                found = Some((summary, format!("{base}/api/v2/incidents.json"), source));
+                break;
             }
         }
 
@@ -796,7 +835,12 @@ async fn cmd_add(name: String, url: Option<String>) -> Result<(), String> {
         return Err(format!("'{display}' is already in your provider list"));
     }
 
-    config.providers.push(CustomProvider { name: display.clone(), source, summary_url, incidents_url });
+    config.providers.push(CustomProvider {
+        name: display.clone(),
+        source,
+        summary_url,
+        incidents_url,
+    });
     save_config(&config)?;
     println!("Added {display}.");
     Ok(())
@@ -808,7 +852,9 @@ fn cmd_remove(name: String) -> Result<(), String> {
     let before = config.providers.len();
     config.providers.retain(|p| p.name != display);
     if config.providers.len() == before {
-        return Err(format!("'{display}' not found. Run `five-nine list` to see custom providers."));
+        return Err(format!(
+            "'{display}' not found. Run `five-nine list` to see custom providers."
+        ));
     }
     save_config(&config)?;
     println!("Removed {display}.");
@@ -887,8 +933,7 @@ async fn cmd_update() -> Result<(), String> {
     let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let tmp_path = current_exe.with_extension("update-tmp");
 
-    std::fs::write(&tmp_path, &bytes)
-        .map_err(|e| format!("Write error: {e}"))?;
+    std::fs::write(&tmp_path, &bytes).map_err(|e| format!("Write error: {e}"))?;
 
     #[cfg(unix)]
     {
@@ -912,22 +957,37 @@ async fn main() -> std::io::Result<()> {
 
     match cli.command {
         Some(Commands::Update) => {
-            if let Err(e) = cmd_update().await { eprintln!("Error: {e}"); std::process::exit(1); }
+            if let Err(e) = cmd_update().await {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
             return Ok(());
         }
         Some(Commands::Status { json }) => {
-            if let Err(e) = cmd_status(json).await { eprintln!("Error: {e}"); std::process::exit(1); }
+            if let Err(e) = cmd_status(json).await {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
             return Ok(());
         }
         Some(Commands::Add { name, url }) => {
-            if let Err(e) = cmd_add(name, url).await { eprintln!("Error: {e}"); std::process::exit(1); }
+            if let Err(e) = cmd_add(name, url).await {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
             return Ok(());
         }
         Some(Commands::Remove { name }) => {
-            if let Err(e) = cmd_remove(name) { eprintln!("Error: {e}"); std::process::exit(1); }
+            if let Err(e) = cmd_remove(name) {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
             return Ok(());
         }
-        Some(Commands::List) => { cmd_list(); return Ok(()); }
+        Some(Commands::List) => {
+            cmd_list();
+            return Ok(());
+        }
         Some(Commands::Monitor) | None => {}
     }
 
@@ -962,7 +1022,8 @@ async fn main() -> std::io::Result<()> {
         terminal.draw(|f| draw(f, &mut app))?;
 
         if event::poll(Duration::from_millis(16))? {
-            if let Event::Key(key) = event::read()? {
+            let evt = event::read()?;
+            if let Event::Key(key) = evt {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('r') => {
@@ -981,7 +1042,11 @@ async fn main() -> std::io::Result<()> {
     }
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -993,15 +1058,25 @@ mod tests {
     use super::*;
 
     fn tmp_path(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("five-nine-test-{}-{}.json", tag, std::process::id()))
+        std::env::temp_dir().join(format!(
+            "five-nine-test-{}-{}.json",
+            tag,
+            std::process::id()
+        ))
     }
 
     fn make_provider(name: &str) -> CustomProvider {
         CustomProvider {
             name: name.to_string(),
             source: format!("status.{}.com", name.to_lowercase()),
-            summary_url: format!("https://status.{}.com/api/v2/summary.json", name.to_lowercase()),
-            incidents_url: format!("https://status.{}.com/api/v2/incidents.json", name.to_lowercase()),
+            summary_url: format!(
+                "https://status.{}.com/api/v2/summary.json",
+                name.to_lowercase()
+            ),
+            incidents_url: format!(
+                "https://status.{}.com/api/v2/incidents.json",
+                name.to_lowercase()
+            ),
         }
     }
 
@@ -1009,7 +1084,9 @@ mod tests {
 
     #[test]
     fn config_round_trip() {
-        let config = Config { providers: vec![make_provider("GITHUB")] };
+        let config = Config {
+            providers: vec![make_provider("GITHUB")],
+        };
         let json = serde_json::to_string(&config).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(back.providers.len(), 1);
@@ -1036,7 +1113,9 @@ mod tests {
     #[test]
     fn save_and_load_round_trip() {
         let path = tmp_path("save-load");
-        let config = Config { providers: vec![make_provider("STRIPE"), make_provider("VERCEL")] };
+        let config = Config {
+            providers: vec![make_provider("STRIPE"), make_provider("VERCEL")],
+        };
         save_config_to(&config, &path).unwrap();
         let loaded = load_config_from(&path);
         assert_eq!(loaded.providers.len(), 2);
@@ -1049,13 +1128,17 @@ mod tests {
 
     #[test]
     fn duplicate_provider_detected() {
-        let config = Config { providers: vec![make_provider("GITHUB")] };
+        let config = Config {
+            providers: vec![make_provider("GITHUB")],
+        };
         assert!(config.providers.iter().any(|p| p.name == "GITHUB"));
     }
 
     #[test]
     fn non_duplicate_not_detected() {
-        let config = Config { providers: vec![make_provider("GITHUB")] };
+        let config = Config {
+            providers: vec![make_provider("GITHUB")],
+        };
         assert!(!config.providers.iter().any(|p| p.name == "STRIPE"));
     }
 
@@ -1064,7 +1147,9 @@ mod tests {
     #[test]
     fn remove_existing_provider() {
         let path = tmp_path("remove-existing");
-        let config = Config { providers: vec![make_provider("GITHUB"), make_provider("STRIPE")] };
+        let config = Config {
+            providers: vec![make_provider("GITHUB"), make_provider("STRIPE")],
+        };
         save_config_to(&config, &path).unwrap();
 
         let mut loaded = load_config_from(&path);
@@ -1077,7 +1162,9 @@ mod tests {
 
     #[test]
     fn remove_nonexistent_provider_is_noop() {
-        let config = Config { providers: vec![make_provider("GITHUB")] };
+        let config = Config {
+            providers: vec![make_provider("GITHUB")],
+        };
         let mut providers = config.providers.clone();
         providers.retain(|p| p.name != "NONEXISTENT");
         assert_eq!(providers.len(), 1);
@@ -1099,7 +1186,9 @@ mod tests {
         let incident = Incident {
             created_at: start.to_rfc3339(),
             resolved_at: Some(end.to_rfc3339()),
-            components: vec![IncidentComponent { name: "API".to_string() }],
+            components: vec![IncidentComponent {
+                name: "API".to_string(),
+            }],
         };
         let result = compute_uptime_from_incidents(&[incident]);
         // Either not in map (100% uptime) or very high
@@ -1115,7 +1204,9 @@ mod tests {
         let incident = Incident {
             created_at: start.to_rfc3339(),
             resolved_at: Some(end.to_rfc3339()),
-            components: vec![IncidentComponent { name: "API".to_string() }],
+            components: vec![IncidentComponent {
+                name: "API".to_string(),
+            }],
         };
         let result = compute_uptime_from_incidents(&[incident]);
         let pct = result.get("API").copied().unwrap_or(100.0);
@@ -1162,9 +1253,7 @@ mod tests {
 
     #[test]
     fn worst_status_all_errors_returns_default() {
-        let providers = vec![
-            (make_provider("A"), Err("err".to_string())),
-        ];
+        let providers = vec![(make_provider("A"), Err("err".to_string()))];
         let (ind, _) = worst_status(&providers);
         assert_eq!(ind, "none");
     }
@@ -1177,7 +1266,8 @@ mod tests {
         let result = fetch_statuspage(
             "https://status.claude.com/api/v2/summary.json",
             "https://status.claude.com/api/v2/incidents.json",
-        ).await;
+        )
+        .await;
         assert!(result.is_ok(), "fetch failed: {:?}", result.err());
         let c = result.unwrap();
         assert!(!c.indicator.is_empty());
@@ -1189,7 +1279,8 @@ mod tests {
         let result = fetch_statuspage(
             "https://status.github.com/api/v2/summary.json",
             "https://status.github.com/api/v2/incidents.json",
-        ).await;
+        )
+        .await;
         assert!(result.is_ok(), "fetch failed: {:?}", result.err());
     }
 
@@ -1197,7 +1288,9 @@ mod tests {
     #[ignore]
     async fn integration_fetch_all_with_defaults() {
         let providers = default_providers();
-        let FetchState::Ok(all) = fetch_all(&providers).await else { panic!("unexpected state") };
+        let FetchState::Ok(all) = fetch_all(&providers).await else {
+            panic!("unexpected state")
+        };
         assert_eq!(all.providers.len(), providers.len());
     }
 }
