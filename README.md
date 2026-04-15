@@ -66,6 +66,46 @@ five-nine
 
 Providers are stored in `~/.config/five-nine/providers.json`. Claude and OpenAI are seeded on first run; edit the file directly to reorder or customise entries.
 
+## Supported services
+
+Any service hosted on [Atlassian Statuspage](https://www.atlassian.com/software/statuspage) works automatically. Auto-discovery handles most of them — just use the service name:
+
+```bash
+five-nine add anthropic
+five-nine add openai
+five-nine add github
+five-nine add gitlab
+five-nine add stripe
+five-nine add vercel
+five-nine add netlify
+five-nine add heroku
+five-nine add pagerduty
+five-nine add twilio
+five-nine add sendgrid
+five-nine add datadog
+five-nine add cloudflare
+five-nine add linear
+five-nine add notion
+five-nine add discord
+five-nine add figma
+five-nine add shopify
+five-nine add intercom
+five-nine add zendesk
+five-nine add atlassian
+five-nine add bitbucket
+five-nine add npm
+five-nine add rubygems
+five-nine add docker
+```
+
+If auto-discovery doesn't find a service, pass the base URL explicitly:
+
+```bash
+five-nine add myservice --url https://status.myservice.com
+```
+
+Services with fully custom status pages (AWS Health, Azure Status, Apple Developer) are **not** supported — they don't expose the Statuspage v2 API.
+
 ## Build from source
 
 ```bash
